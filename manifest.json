@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "GomLink Spatial — Quick Link Collector for AI Agents",
+  "version": "2.2.0",
+  "description": "Click trái vào Icon (hoặc Alt+S) để lưu ngầm tức thì không tắt tab. Click chuột phải vào Icon để mở Sổ Glassmorphism.",
+  "permissions": ["tabs", "storage", "contextMenus", "alarms"],
+  "host_permissions": ["http://127.0.0.1:18999/*"],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "Click trái: Lưu nhanh link này (Ngầm)\nChuột phải: Mở Sổ Gom Link"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "commands": {
+    "add-link": {
+      "suggested_key": {
+        "default": "Alt+S"
+      },
+      "description": "Lưu ngầm link hiện tại vào Note"
+    }
+  }
+}

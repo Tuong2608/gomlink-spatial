@@ -1,0 +1,7 @@
+# Không đẩy danh sách link cá nhân lên GitHub
+inbox_links.md
+da_doc_links.md
+sync_state.json
+__pycache__/
+*.pyc
+.DS_Store
