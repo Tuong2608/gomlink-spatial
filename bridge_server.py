@@ -1,244 +1,387 @@
+"""
+GomLink Spatial - Local AI Agent Bridge Server
+Provides a high-performance, robust HTTP bridge between Chrome Extension and local files:
+- inbox_links.md (live incoming queue for AI Agents)
+- da_doc_links.md (archived processed links)
+- sync_state.json (sync token tracker)
+"""
+
+from __future__ import annotations
+
 import json
+import logging
 import os
+import sys
+
+sys.dont_write_bytecode = True
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any, Dict, List, Optional, Tuple
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-INBOX_FILE = os.path.join(BASE_DIR, "inbox_links.md")
-ARCHIVE_FILE = os.path.join(BASE_DIR, "da_doc_links.md")
-STATE_FILE = os.path.join(BASE_DIR, "sync_state.json")
-HOST = "127.0.0.1"
-PORT = 18999
+logger = logging.getLogger("GomLinkBridge")
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 
-
-def ensure_files():
-    if not os.path.exists(INBOX_FILE):
-        with open(INBOX_FILE, "w", encoding="utf-8") as f:
-            f.write("")
-    if not os.path.exists(ARCHIVE_FILE):
-        with open(ARCHIVE_FILE, "w", encoding="utf-8") as f:
-            f.write(
-                "# 📚 Lịch Sử Các Link Đã Đọc & Phân Tích (Archive)\n"
-                "> Các link ở đây đã được Antigravity đọc và phân tích xong.\n\n"
-            )
-    if not os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"clear_token": 0}, f)
+DEFAULT_BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_HOST: str = "127.0.0.1"
+DEFAULT_PORT: int = 18999
 
 
-def read_text(path):
-    ensure_files()
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+class GomLinkStorage:
+    """Encapsulates persistent file access, thread safety, and auto-recovery."""
 
+    def __init__(self, base_dir: Optional[str] = None) -> None:
+        self.base_dir: str = base_dir or DEFAULT_BASE_DIR
+        self.inbox_file: str = os.path.join(self.base_dir, "inbox_links.md")
+        self.archive_file: str = os.path.join(self.base_dir, "da_doc_links.md")
+        self.state_file: str = os.path.join(self.base_dir, "sync_state.json")
+        self.ensure_files()
 
-def write_text(path, content):
-    ensure_files()
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
+    def ensure_files(self) -> None:
+        """Create initial files if missing."""
+        os.makedirs(self.base_dir, exist_ok=True)
+        if not os.path.exists(self.inbox_file):
+            with open(self.inbox_file, "w", encoding="utf-8") as f:
+                f.write("")
+        if not os.path.exists(self.archive_file):
+            with open(self.archive_file, "w", encoding="utf-8") as f:
+                f.write(
+                    "# 📚 Lịch Sử Các Link Đã Đọc & Phân Tích (Archive)\n"
+                    "> Các link ở đây đã được Antigravity đọc và phân tích xong.\n\n"
+                )
+        if not os.path.exists(self.state_file):
+            self._write_state({"clear_token": 0})
 
+    def _write_state(self, state: Dict[str, Any]) -> None:
+        with open(self.state_file, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
 
-def get_clear_token():
-    ensure_files()
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f).get("clear_token", 0)
-    except Exception:
+    def read_text(self, path: str) -> str:
+        """Read full text content safely with automatic creation on error."""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError:
+            self.ensure_files()
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception as e:
+            logger.error("Failed to read %s: %s", path, e)
+            return ""
+
+    def write_text(self, path: str, content: str) -> bool:
+        """Write text content to file safely."""
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return True
+        except Exception as e:
+            logger.error("Failed to write to %s: %s", path, e)
+            return False
+
+    def get_clear_token(self) -> int:
+        """Get the current clear token with auto-healing for corrupted state files."""
+        try:
+            with open(self.state_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    token = data.get("clear_token", 0)
+                    return int(token)
+        except (json.JSONDecodeError, ValueError, FileNotFoundError, TypeError):
+            logger.warning("Corrupted or missing sync state. Resetting state file.")
+            self._write_state({"clear_token": 0})
+        except Exception as e:
+            logger.error("Unexpected error reading clear token: %s", e)
         return 0
 
+    def bump_clear_token(self) -> int:
+        """Update and return a new timestamp-based clear token."""
+        token = int(datetime.now().timestamp() * 1000)
+        self._write_state({"clear_token": token})
+        return token
 
-def bump_clear_token():
-    token = int(datetime.now().timestamp() * 1000)
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump({"clear_token": token}, f)
-    return token
+    @staticmethod
+    def count_lines(text: Optional[str]) -> int:
+        """Count valid non-header, non-quote content lines."""
+        if not text:
+            return 0
+        return len(
+            [
+                line.strip()
+                for line in text.splitlines()
+                if line.strip()
+                and not line.strip().startswith("#")
+                and not line.strip().startswith(">")
+            ]
+        )
 
+    @staticmethod
+    def clean_title(title: Optional[str]) -> str:
+        """Sanitize title by removing carriage returns and excessive whitespace."""
+        if not title:
+            return "Không tiêu đề"
+        cleaned = " ".join(title.replace("\r", " ").replace("\n", " ").split())
+        return cleaned or "Không tiêu đề"
 
-def count_lines(text):
-    return len(
-        [
-            line.strip()
-            for line in (text or "").splitlines()
-            if line.strip()
-            and not line.strip().startswith("#")
-            and not line.strip().startswith(">")
-        ]
-    )
+    @staticmethod
+    def format_link_line(title: str, url: str) -> str:
+        """Format link entry as Markdown item."""
+        clean_title = GomLinkStorage.clean_title(title)
+        return f"- {clean_title} | {url.strip()}\n"
+
+    def get_status_payload(self) -> Dict[str, Any]:
+        """Build standard status snapshot."""
+        inbox = self.read_text(self.inbox_file)
+        archive = self.read_text(self.archive_file)
+        return {
+            "ok": True,
+            "note": inbox,
+            "inbox_count": self.count_lines(inbox),
+            "archive_count": self.count_lines(archive),
+            "clear_token": self.get_clear_token(),
+            "inbox_path": self.inbox_file,
+            "archive_path": self.archive_file,
+        }
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
-    def _set_cors(self, status=200):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
+    """HTTP request handler supporting CORS, JSON payloads, and storage interactions."""
 
-    def log_message(self, format, *args):
+    storage: GomLinkStorage = GomLinkStorage()
+
+    def log_message(self, format: str, *args: Any) -> None:
+        """Disable default noisy console logging."""
         pass
 
-    def do_OPTIONS(self):
-        self._set_cors(200)
-
-    def do_GET(self):
-        if self.path.startswith("/status"):
-            inbox = read_text(INBOX_FILE)
-            archive = read_text(ARCHIVE_FILE)
-            resp = {
-                "ok": True,
-                "note": inbox,
-                "inbox_count": count_lines(inbox),
-                "archive_count": count_lines(archive),
-                "clear_token": get_clear_token(),
-                "inbox_path": INBOX_FILE,
-                "archive_path": ARCHIVE_FILE,
-            }
-            self._set_cors(200)
-            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
-        else:
-            self._set_cors(404)
-            self.wfile.write(json.dumps({"ok": False, "error": "Not found"}).encode("utf-8"))
-
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        raw_body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
+    def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
+        """Unified helper to send standard JSON responses with CORS headers."""
         try:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def do_OPTIONS(self) -> None:
+        """Handle CORS pre-flight requests."""
+        self._send_json(200, {"ok": True})
+
+    def do_GET(self) -> None:
+        """Handle GET requests (/status)."""
+        if self.path.startswith("/status"):
+            self._send_json(200, self.storage.get_status_payload())
+        else:
+            self._send_json(404, {"ok": False, "error": f"Endpoint not found: {self.path}"})
+
+    def _read_json_body(self) -> Tuple[bool, Dict[str, Any], Optional[str]]:
+        """Safely parse incoming JSON body with strict type and error checking."""
+        try:
+            content_length_header = self.headers.get("Content-Length")
+            if not content_length_header:
+                return True, {}, None
+            length = int(content_length_header)
+            if length < 0:
+                return False, {}, "Invalid negative Content-Length"
+            raw_body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
             data = json.loads(raw_body)
-        except Exception:
-            data = {}
+            if not isinstance(data, dict):
+                return False, {}, "Body must be a JSON object"
+            return True, data, None
+        except json.JSONDecodeError as e:
+            return False, {}, f"Invalid JSON payload: {e}"
+        except ValueError as e:
+            return False, {}, f"Invalid Content-Length header or encoding: {e}"
+        except Exception as e:
+            return False, {}, f"Unexpected body read error: {e}"
+
+    def do_POST(self) -> None:
+        """Handle POST actions (/add, /sync, /update, /mark-read)."""
+        ok, data, error_msg = self._read_json_body()
+        if not ok:
+            self._send_json(400, {"ok": False, "error": error_msg})
+            return
 
         if self.path.startswith("/add"):
-            url = (data.get("url") or "").strip()
-            title = (
-                (data.get("title") or "Không tiêu đề")
-                .replace("\r", " ")
-                .replace("\n", " ")
-                .strip()
-            )
-            force = bool(data.get("force", False))
-
-            inbox = read_text(INBOX_FILE)
-            archive = read_text(ARCHIVE_FILE)
-
-            if not url or url.startswith("chrome://") or url.startswith("edge://"):
-                status_code = "ignored"
-            elif url in inbox:
-                status_code = "already_in_inbox"
-            elif (not force) and (url in archive):
-                status_code = "already_read"
-            else:
-                new_line = f"- {title} | {url}\n"
-                if inbox and not inbox.endswith("\n"):
-                    inbox += "\n"
-                inbox += new_line
-                write_text(INBOX_FILE, inbox)
-                status_code = "added"
-
-            resp = {
-                "ok": True,
-                "status": status_code,
-                "note": inbox,
-                "inbox_count": count_lines(inbox),
-                "archive_count": count_lines(archive),
-                "clear_token": get_clear_token(),
-            }
-            self._set_cors(200)
-            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
-
+            self._handle_add(data)
         elif self.path.startswith("/sync"):
-            # Đồng bộ 2 chiều giữa chrome.storage.local và inbox_links.md
-            local_note = data.get("local_note") or ""
-            client_token = data.get("clear_token") or 0
-            server_token = get_clear_token()
-
-            inbox = read_text(INBOX_FILE)
-            archive = read_text(ARCHIVE_FILE)
-
-            if server_token > client_token:
-                # Server vừa được Antigravity mark-read, yêu cầu client xóa local_note
-                resp = {
-                    "ok": True,
-                    "note": inbox,
-                    "inbox_count": count_lines(inbox),
-                    "archive_count": count_lines(archive),
-                    "clear_token": server_token,
-                    "cleared": True,
-                }
-            else:
-                # Gộp các dòng mới từ local_note (nếu chưa có trong inbox và chưa có trong archive)
-                changed = False
-                for line in local_note.splitlines():
-                    line_s = line.strip()
-                    if not line_s:
-                        continue
-                    parts = line_s.split("|")
-                    url_part = parts[-1].strip() if len(parts) > 1 else line_s
-                    if (
-                        url_part.startswith("http")
-                        and (url_part not in inbox)
-                        and (url_part not in archive)
-                    ):
-                        if inbox and not inbox.endswith("\n"):
-                            inbox += "\n"
-                        inbox += line_s + "\n"
-                        changed = True
-                if changed:
-                    write_text(INBOX_FILE, inbox)
-
-                resp = {
-                    "ok": True,
-                    "note": inbox,
-                    "inbox_count": count_lines(inbox),
-                    "archive_count": count_lines(archive),
-                    "clear_token": server_token,
-                    "cleared": False,
-                }
-            self._set_cors(200)
-            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
-
+            self._handle_sync(data)
         elif self.path.startswith("/update"):
-            new_note = data.get("note", "")
-            write_text(INBOX_FILE, new_note)
-            archive = read_text(ARCHIVE_FILE)
-            token = bump_clear_token() if not new_note.strip() else get_clear_token()
-            resp = {
-                "ok": True,
-                "note": new_note,
-                "inbox_count": count_lines(new_note),
-                "archive_count": count_lines(archive),
-                "clear_token": token,
-            }
-            self._set_cors(200)
-            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
-
+            self._handle_update(data)
         elif self.path.startswith("/mark-read"):
-            inbox = read_text(INBOX_FILE).strip()
-            archive = read_text(ARCHIVE_FILE)
-            if inbox:
-                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                if not archive.endswith("\n"):
-                    archive += "\n"
-                archive += f"\n## Đợt đọc lúc {now_str}\n{inbox}\n"
-                write_text(ARCHIVE_FILE, archive)
-                write_text(INBOX_FILE, "")
-            token = bump_clear_token()
+            self._handle_mark_read()
+        else:
+            self._send_json(404, {"ok": False, "error": f"Endpoint not found: {self.path}"})
+
+    def _handle_add(self, data: Dict[str, Any]) -> None:
+        url = str(data.get("url") or "").strip()
+        title = self.storage.clean_title(str(data.get("title") or ""))
+        force = bool(data.get("force", False))
+
+        inbox = self.storage.read_text(self.storage.inbox_file)
+        archive = self.storage.read_text(self.storage.archive_file)
+
+        if (
+            not url
+            or url.startswith("chrome://")
+            or url.startswith("edge://")
+            or url.startswith("about:")
+        ):
+            status_code = "ignored"
+        elif url in inbox:
+            status_code = "already_in_inbox"
+        elif (not force) and (url in archive):
+            status_code = "already_read"
+        else:
+            new_line = self.storage.format_link_line(title, url)
+            if inbox and not inbox.endswith("\n"):
+                inbox += "\n"
+            inbox += new_line
+            self.storage.write_text(self.storage.inbox_file, inbox)
+            status_code = "added"
+
+        resp = {
+            "ok": True,
+            "status": status_code,
+            "note": inbox,
+            "inbox_count": self.storage.count_lines(inbox),
+            "archive_count": self.storage.count_lines(archive),
+            "clear_token": self.storage.get_clear_token(),
+        }
+        self._send_json(200, resp)
+
+    def _handle_sync(self, data: Dict[str, Any]) -> None:
+        local_note = str(data.get("local_note") or "")
+        try:
+            client_token = int(data.get("clear_token") or 0)
+        except (ValueError, TypeError):
+            client_token = 0
+
+        server_token = self.storage.get_clear_token()
+        inbox = self.storage.read_text(self.storage.inbox_file)
+        archive = self.storage.read_text(self.storage.archive_file)
+
+        if server_token > client_token:
+            # Server was marked-read by an agent; signal client to flush local storage
             resp = {
                 "ok": True,
-                "note": "",
-                "inbox_count": 0,
-                "archive_count": count_lines(archive),
-                "clear_token": token,
+                "note": inbox,
+                "inbox_count": self.storage.count_lines(inbox),
+                "archive_count": self.storage.count_lines(archive),
+                "clear_token": server_token,
+                "cleared": True,
             }
-            self._set_cors(200)
-            self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
-
         else:
-            self._set_cors(404)
-            self.wfile.write(json.dumps({"ok": False, "error": "Not found"}).encode("utf-8"))
+            # Bidirectional merge of unseen lines
+            changed = False
+            for line in local_note.splitlines():
+                line_s = line.strip()
+                if not line_s or line_s.startswith("#") or line_s.startswith(">"):
+                    continue
+                parts = line_s.split("|")
+                url_part = parts[-1].strip() if len(parts) > 1 else line_s
+                if (
+                    url_part.startswith("http")
+                    and (url_part not in inbox)
+                    and (url_part not in archive)
+                ):
+                    if inbox and not inbox.endswith("\n"):
+                        inbox += "\n"
+                    inbox += line_s + "\n"
+                    changed = True
+
+            if changed:
+                self.storage.write_text(self.storage.inbox_file, inbox)
+
+            resp = {
+                "ok": True,
+                "note": inbox,
+                "inbox_count": self.storage.count_lines(inbox),
+                "archive_count": self.storage.count_lines(archive),
+                "clear_token": server_token,
+                "cleared": False,
+            }
+        self._send_json(200, resp)
+
+    def _handle_update(self, data: Dict[str, Any]) -> None:
+        new_note = str(data.get("note") or "")
+        self.storage.write_text(self.storage.inbox_file, new_note)
+        archive = self.storage.read_text(self.storage.archive_file)
+        token = (
+            self.storage.bump_clear_token()
+            if not new_note.strip()
+            else self.storage.get_clear_token()
+        )
+        resp = {
+            "ok": True,
+            "note": new_note,
+            "inbox_count": self.storage.count_lines(new_note),
+            "archive_count": self.storage.count_lines(archive),
+            "clear_token": token,
+        }
+        self._send_json(200, resp)
+
+    def _handle_mark_read(self) -> None:
+        inbox = self.storage.read_text(self.storage.inbox_file).strip()
+        archive = self.storage.read_text(self.storage.archive_file)
+        if inbox:
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if not archive.endswith("\n"):
+                archive += "\n"
+            archive += f"\n## Đợt đọc lúc {now_str}\n{inbox}\n"
+            self.storage.write_text(self.storage.archive_file, archive)
+            self.storage.write_text(self.storage.inbox_file, "")
+        token = self.storage.bump_clear_token()
+        resp = {
+            "ok": True,
+            "note": "",
+            "inbox_count": 0,
+            "archive_count": self.storage.count_lines(archive),
+            "clear_token": token,
+        }
+        self._send_json(200, resp)
+
+
+def create_server(
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    storage: Optional[GomLinkStorage] = None,
+) -> HTTPServer:
+    """Create configured HTTPServer instance with socket reuse enabled."""
+    storage_instance = storage or GomLinkStorage()
+
+    class CustomHandler(BridgeHandler):
+        storage = storage_instance
+
+    HTTPServer.allow_reuse_address = True
+    server = HTTPServer((host, port), CustomHandler)
+    return server
+
+
+def main() -> None:
+    """Entry point for running the server CLI."""
+    host = os.environ.get("GOMLINK_HOST", DEFAULT_HOST)
+    port = int(os.environ.get("GOMLINK_PORT", str(DEFAULT_PORT)))
+    storage = GomLinkStorage()
+    server = create_server(host=host, port=port, storage=storage)
+    logger.info("GomLink Bridge Server running at http://%s:%d", host, port)
+    logger.info("Inbox file: %s", storage.inbox_file)
+    logger.info("Archive file: %s", storage.archive_file)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        logger.info("Shutting down GomLink Bridge gracefully...")
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":
-    ensure_files()
-    server = HTTPServer((HOST, PORT), BridgeHandler)
-    server.serve_forever()
+    main()

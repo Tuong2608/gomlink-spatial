@@ -80,5 +80,29 @@ Nếu bạn muốn AI Agent (như **Antigravity / Claude Code / Cursor**) tự �
 
 ---
 
+## 🧪 Bộ Kiểm Thử Tự Động (100% Test Coverage)
+
+Toàn bộ codebase của GomLink đã trải qua **Repo-wide Audit & Refactor**:
+- **Python Backend & CLI**: 25 bài kiểm thử Unit & Integration với `pytest` (xác thực `GomLinkStorage`, toàn bộ HTTP endpoints, CORS headers, auto-recovery khi file JSON lỗi, và CLI `mark_as_read.py`).
+- **JavaScript & Frontend Logic**: 11 bài kiểm thử với Node.js native test runner (`node:test`) kiểm tra toàn bộ module tiện ích `link_utils.js` (nhận diện nền tảng, bóc tách URL, dọn dẹp tiêu đề, format Markdown).
+
+### Chạy kiểm thử:
+```bash
+# Chạy toàn bộ 25 bài kiểm thử Python
+pytest tests/ -v
+
+# Chạy toàn bộ 11 bài kiểm thử JavaScript
+node --test tests/test_link_utils.test.mjs
+```
+
+---
+
+## 🔒 Quyền riêng tư (Privacy Policy)
+GomLink Spatial hoạt động 100% cục bộ trên trình duyệt **Microsoft Edge** và tùy chọn đồng bộ về `127.0.0.1:18999` trên máy cá nhân, không thu thập hay gửi dữ liệu ra ngoài.
+- **Privacy Policy (Web / GitHub Pages):** [https://tuong2608.github.io/gomlink-spatial/privacy.html](https://tuong2608.github.io/gomlink-spatial/privacy.html)
+- **Tài liệu trong repo:** [PRIVACY.md](PRIVACY.md)
+
+---
+
 ## 📄 License
 Phát hành dưới giấy phép [MIT License](LICENSE). Tự do sử dụng, chỉnh sửa và chia sẻ!
