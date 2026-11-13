@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GomLink Spatial — Quick Link Collector for AI Agents",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "Click trái vào Icon (hoặc Alt+S) để lưu ngầm tức thì không tắt tab. Click chuột phải vào Icon để mở Sổ Glassmorphism.",
   "permissions": ["tabs", "storage", "contextMenus", "alarms"],
   "host_permissions": ["http://127.0.0.1:18999/*"],
